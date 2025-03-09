@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>3D Rolling Ball with Joystick Controls</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            touch-action: none;
+            background-color: #1a1a1a;
+        }
+        canvas {
+            display: block;
+        }
+        .joystick-container {
+            position: absolute;
+            width: 120px;
+            height: 120px;
+            background-color: rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            touch-action: none;
+        }
+        #joystick-move {
+            bottom: 20px;
+            right: 20px;
+        }
+        #joystick-rotate {
+            bottom: 20px;
+            left: 20px;
+        }
+        .joystick {
+            width: 50px;
+            height: 50px;
+            background-color: #ff5733;
+            border-radius: 50%;
+            position: absolute;
+        }
+        /* Debug Overlay */
+        #debug {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            color: #fff;
+            padding: 10px;
+            font-family: monospace;
+            font-size: 14px;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="debug">Loading debug info...</div>
+
+    <div class="joystick-container" id="joystick-move">
+        <div class="joystick"></div>
+    </div>
+    <div class="joystick-container" id="joystick-rotate">
+        <div class="joystick"></div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        let scene, camera, renderer, ball, terrain, gridHelper;
+        let velocity = { x: 0, z: 0, y: 0 };
+        let damping = 0.95;
+        let gravity = -0.1;
+        let moveVector = { x: 0, z: 0 };
+        let rotationAngle = 0;
+        const terrainSize = 2000;
+
+        function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 5000);
+            renderer = new THREE.WebGLRenderer();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            let ballGeometry = new THREE.SphereGeometry(5, 32, 32);
+            let ballMaterial = new THREE.MeshStandardMaterial({ color: 0xff0000 });
+            ball = new THREE.Mesh(ballGeometry, ballMaterial);
+            ball.position.y = 5;
+            scene.add(ball);
+
+            let terrainGeometry = new THREE.PlaneGeometry(terrainSize, terrainSize, 100, 100);
+            let terrainMaterial = new THREE.MeshStandardMaterial({ color: 0x228B22 });
+            terrain = new THREE.Mesh(terrainGeometry, terrainMaterial);
+            terrain.rotation.x = -Math.PI / 2;
+            scene.add(terrain);
+
+            gridHelper = new THREE.GridHelper(terrainSize, 50, 0xffffff, 0xffffff);
+            scene.add(gridHelper);
+
+            let light = new THREE.DirectionalLight(0xffffff, 1);
+            light.position.set(5, 10, 5);
+            scene.add(light);
+
+            camera.position.set(0, 100, 250);
+            camera.lookAt(ball.position);
+
+            setupJoystickControls();
+            animate();
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            velocity.x += moveVector.x * 1.5;
+            velocity.z += moveVector.z * 1.5;
+
+            velocity.y += gravity;
+            velocity.x *= damping;
+            velocity.z *= damping;
+            velocity.y *= damping;
+
+            ball.position.x += velocity.x;
+            ball.position.z += velocity.z;
+            ball.position.y += velocity.y;
+
+            if (ball.position.y < 5) {
+                ball.position.y = 5;
+                velocity.y = 0;
+            }
+
+            let distance = 250;
+            camera.position.x = ball.position.x + Math.sin(rotationAngle) * distance;
+            camera.position.z = ball.position.z + Math.cos(rotationAngle) * distance;
+            camera.lookAt(ball.position);
+
+            updateDebugInfo();
+            renderer.render(scene, camera);
+        }
+
+        function updateDebugInfo() {
+            document.getElementById("debug").innerHTML = `
+                Ball Position: X=${ball.position.x.toFixed(2)}, Y=${ball.position.y.toFixed(2)}, Z=${ball.position.z.toFixed(2)}<br>
+                Velocity: X=${velocity.x.toFixed(2)}, Y=${velocity.y.toFixed(2)}, Z=${velocity.z.toFixed(2)}<br>
+                Joystick: MoveX=${moveVector.x.toFixed(2)}, MoveZ=${moveVector.z.toFixed(2)}<br>
+                Camera Angle: ${rotationAngle.toFixed(2)}
+            `;
+        }
+
+        function setupJoystickControls() {
+            const joystickMove = document.querySelector("#joystick-move .joystick");
+            const joystickRotate = document.querySelector("#joystick-rotate .joystick");
+
+            ["mousedown", "touchstart"].forEach(evt => {
+                joystickMove.addEventListener(evt, (e) => startJoystick(e, "move"));
+                joystickRotate.addEventListener(evt, (e) => startJoystick(e, "rotate"));
+            });
+
+            ["mousemove", "touchmove"].forEach(evt => {
+                joystickMove.addEventListener(evt, (e) => moveJoystick(e, "move"));
+                joystickRotate.addEventListener(evt, (e) => moveJoystick(e, "rotate"));
+            });
+
+            ["mouseup", "mouseleave", "touchend"].forEach(evt => {
+                joystickMove.addEventListener(evt, (e) => resetJoystick(e, "move"));
+                joystickRotate.addEventListener(evt, (e) => resetJoystick(e, "rotate"));
+            });
+        }
+
+        function startJoystick(event, joystickType) {
+            event.preventDefault();
+            event.target.dataset.active = "true";
+        }
+
+        function moveJoystick(event, joystickType) {
+            event.preventDefault();
+            let touch = event.touches ? event.touches[0] : event;
+            let rect = event.target.parentElement.getBoundingClientRect();
+            let centerX = rect.left + rect.width / 2;
+            let centerY = rect.top + rect.height / 2;
+            let deltaX = touch.clientX - centerX;
+            let deltaY = touch.clientY - centerY;
+            let maxRadius = rect.width / 2 - 10;
+
+            if (joystickType === "move") {
+                moveVector.x = Math.max(-1, Math.min(1, deltaX / maxRadius));
+                moveVector.z = Math.max(-1, Math.min(1, deltaY / maxRadius));
+            } else if (joystickType === "rotate") {
+                rotationAngle -= (deltaX / maxRadius) * 0.05;
+            }
+        }
+
+        function resetJoystick(event, joystickType) {
+            event.preventDefault();
+            event.target.dataset.active = "false";
+            if (joystickType === "move") {
+                moveVector.x = 0;
+                moveVector.z = 0;
+            }
+        }
+
+        init();
+    </script>
+
+</body>
+</html>
