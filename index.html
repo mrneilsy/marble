@@ -66,23 +66,27 @@
         // Global variables
         let scene, camera, renderer, ball, terrain;
         let velocity = { x: 0, y: 0, z: 0 };
-        let gravity = 0.05;
-        let damping = 0.98;
+        let angularVelocity = { x: 0, y: 0, z: 0 };
         let moveVector = { x: 0, z: 0 };
         let rotationAngle = 0;
         let isOnGround = true;
         let obstacles = [];
         let ramps = [];
-        const terrainSize = 400; // Doubled the terrain size
-        const bounceFactor = -0.7;
+        const terrainSize = 400;
         const ballRadius = 3;
         let speedDisplay = document.getElementById('speed');
         let heightDisplay = document.getElementById('height');
 
-        // Physics variables
+        // Physics constants - improved values for more realistic physics
         const GRAVITY = 0.05;
         const GROUND_FRICTION = 0.02;
+        const AIR_RESISTANCE = 0.995;
         const BALL_ROTATION_FACTOR = 0.5;
+        const RESTITUTION = 0.8;  // More realistic bounce factor
+
+        // Collision detection helpers
+        const raycaster = new THREE.Raycaster();
+        const ballDirection = new THREE.Vector3();
 
         function init() {
             // Create scene
@@ -178,6 +182,7 @@
             northWall.position.set(0, wallHeight / 2, -terrainSize / 2 - wallThickness / 2);
             northWall.castShadow = true;
             northWall.receiveShadow = true;
+            northWall.userData.isWall = true;
             scene.add(northWall);
             obstacles.push(northWall);
             
@@ -189,6 +194,7 @@
             southWall.position.set(0, wallHeight / 2, terrainSize / 2 + wallThickness / 2);
             southWall.castShadow = true;
             southWall.receiveShadow = true;
+            southWall.userData.isWall = true;
             scene.add(southWall);
             obstacles.push(southWall);
             
@@ -200,6 +206,7 @@
             eastWall.position.set(terrainSize / 2 + wallThickness / 2, wallHeight / 2, 0);
             eastWall.castShadow = true;
             eastWall.receiveShadow = true;
+            eastWall.userData.isWall = true;
             scene.add(eastWall);
             obstacles.push(eastWall);
             
@@ -211,6 +218,7 @@
             westWall.position.set(-terrainSize / 2 - wallThickness / 2, wallHeight / 2, 0);
             westWall.castShadow = true;
             westWall.receiveShadow = true;
+            westWall.userData.isWall = true;
             scene.add(westWall);
             obstacles.push(westWall);
         }
@@ -242,6 +250,7 @@
                 obstacle.position.set(x, height / 2, z);
                 obstacle.castShadow = true;
                 obstacle.receiveShadow = true;
+                obstacle.userData.isBox = true;
                 
                 // Add to scene and obstacles array
                 scene.add(obstacle);
@@ -264,6 +273,8 @@
                 cylinder.position.set(x, height / 2, z);
                 cylinder.castShadow = true;
                 cylinder.receiveShadow = true;
+                cylinder.userData.isCylinder = true;
+                cylinder.userData.radius = radius;
                 
                 scene.add(cylinder);
                 obstacles.push(cylinder);
@@ -364,6 +375,7 @@
             ramp.rotation.y = rotation;
             ramp.castShadow = true;
             ramp.receiveShadow = true;
+            ramp.userData.isRamp = true;
             
             // Add to scene and ramps array
             scene.add(ramp);
@@ -386,125 +398,226 @@
         }
 
         function updatePhysics() {
-            // Apply input force from joystick
-            if (isOnGround) {
-                velocity.x += moveVector.x * 0.2;
-                velocity.z += moveVector.z * 0.2;
-            } else {
-                // Less control in the air
-                velocity.x += moveVector.x * 0.05;
-                velocity.z += moveVector.z * 0.05;
-            }
+            // Calculate movement direction relative to camera
+            const forward = new THREE.Vector3(0, 0, 1).applyAxisAngle(new THREE.Vector3(0, 1, 0), rotationAngle);
+            const right = new THREE.Vector3(1, 0, 0).applyAxisAngle(new THREE.Vector3(0, 1, 0), rotationAngle);
+            
+            const moveDirection = new THREE.Vector3()
+                .addScaledVector(forward, -moveVector.z)  // Forward/backward
+                .addScaledVector(right, moveVector.x);    // Left/right
+            
+            // Apply input force 
+            const forceFactor = isOnGround ? 0.2 : 0.05; // Less control in air
+            velocity.x += moveDirection.x * forceFactor;
+            velocity.z += moveDirection.z * forceFactor;
             
             // Apply gravity
-            velocity.y -= gravity;
+            velocity.y -= GRAVITY;
+            
+            // Store previous position for collision response
+            const prevPosition = new THREE.Vector3().copy(ball.position);
             
             // Update position with velocity
             ball.position.x += velocity.x;
             ball.position.y += velocity.y;
             ball.position.z += velocity.z;
             
-            // Check for ground collision
+            // Ground collision with restitution
+            handleGroundCollision();
+            
+            // Handle obstacle collisions with improved detection
+            handleObstacleCollisions(prevPosition);
+            
+            // Apply air resistance
+            velocity.x *= AIR_RESISTANCE;
+            velocity.y *= AIR_RESISTANCE;
+            velocity.z *= AIR_RESISTANCE;
+            
+            // Ground friction when on ground
+            if (isOnGround) {
+                velocity.x *= (1 - GROUND_FRICTION);
+                velocity.z *= (1 - GROUND_FRICTION);
+            }
+            
+            // Rotate the ball based on movement (improved physics)
+            if (isOnGround) {
+                // Calculate rotation axis perpendicular to movement direction
+                const movementDir = new THREE.Vector3(velocity.x, 0, velocity.z).normalize();
+                const rotationAxis = new THREE.Vector3(-velocity.z, 0, velocity.x).normalize();
+                
+                // Calculate angular velocity based on linear velocity and ball radius
+                const speed = Math.sqrt(velocity.x * velocity.x + velocity.z * velocity.z);
+                const angularSpeed = speed / ballRadius;
+                
+                // Apply rotation
+                if (speed > 0.01) {
+                    const rotQuat = new THREE.Quaternion();
+                    rotQuat.setFromAxisAngle(rotationAxis, angularSpeed * BALL_ROTATION_FACTOR);
+                    ball.quaternion.premultiply(rotQuat);
+                }
+            }
+        }
+
+        function handleGroundCollision() {
             if (ball.position.y <= ballRadius) {
                 ball.position.y = ballRadius;
-                velocity.y = velocity.y < 0 ? velocity.y * bounceFactor : velocity.y;
                 
-                // Apply ground friction when on ground
-                if (Math.abs(velocity.y) < 0.1) {
-                    velocity.y = 0;
-                    isOnGround = true;
+                // Calculate bounce with proper restitution
+                if (velocity.y < 0) {
+                    velocity.y = -velocity.y * RESTITUTION;
                     
-                    // Apply friction to horizontal movement
-                    velocity.x *= (1 - GROUND_FRICTION);
-                    velocity.z *= (1 - GROUND_FRICTION);
+                    // If velocity is very small, just stop it
+                    if (Math.abs(velocity.y) < 0.1) {
+                        velocity.y = 0;
+                        isOnGround = true;
+                    }
                 }
             } else {
                 isOnGround = false;
             }
-            
-            // Apply damping to horizontal movement
-            velocity.x *= damping;
-            velocity.z *= damping;
-            
-            // Rotate the ball based on movement
-            if (isOnGround) {
-                ball.rotation.z -= velocity.x * BALL_ROTATION_FACTOR;
-                ball.rotation.x += velocity.z * BALL_ROTATION_FACTOR;
-            }
-            
-            // Check for obstacle collisions
-            checkObstacleCollisions();
-            
-            // Check for terrain boundaries
-            checkTerrainBoundaries();
         }
 
-        function checkObstacleCollisions() {
+        function handleObstacleCollisions(prevPosition) {
+            const ballPosition = new THREE.Vector3(ball.position.x, ball.position.y, ball.position.z);
+            
+            // Create a bounding sphere for the ball
+            const ballBoundingSphere = new THREE.Sphere(ballPosition, ballRadius);
+            
+            // Get movement direction for this frame
+            const movementDir = new THREE.Vector3()
+                .subVectors(ballPosition, prevPosition)
+                .normalize();
+            
             for (let i = 0; i < obstacles.length; i++) {
                 const obstacle = obstacles[i];
                 
-                // Get obstacle dimensions
-                let boundingBox = new THREE.Box3().setFromObject(obstacle);
-                let obstacleSize = new THREE.Vector3();
-                boundingBox.getSize(obstacleSize);
+                // Use different collision detection based on obstacle type
+                if (obstacle.userData.isCylinder) {
+                    handleCylinderCollision(obstacle, ballBoundingSphere, movementDir);
+                } else {
+                    // Box objects and walls
+                    handleBoxCollision(obstacle, ballBoundingSphere, prevPosition);
+                }
+            }
+            
+            // Ensure we're still within terrain bounds
+            checkTerrainBoundaries();
+        }
+
+        function handleCylinderCollision(cylinder, ballSphere, movementDir) {
+            // Get cylinder parameters
+            const cylinderRadius = cylinder.userData.radius;
+            const cylinderHeight = cylinder.geometry.parameters.height;
+            const cylinderPosition = cylinder.position.clone();
+            
+            // Get horizontal distance from cylinder center to ball center
+            const horizontalDiff = new THREE.Vector2(
+                ballSphere.center.x - cylinderPosition.x,
+                ballSphere.center.z - cylinderPosition.z
+            );
+            const horizontalDistance = horizontalDiff.length();
+            
+            // Calculate the vertical bounds of the cylinder
+            const cylinderTop = cylinderPosition.y + cylinderHeight / 2;
+            const cylinderBottom = cylinderPosition.y - cylinderHeight / 2;
+            
+            // Check if ball is within cylinder's height range
+            if (ballSphere.center.y + ballRadius > cylinderBottom && 
+                ballSphere.center.y - ballRadius < cylinderTop) {
                 
-                // Calculate distance between ball and obstacle
-                const dx = ball.position.x - obstacle.position.x;
-                const dy = ball.position.y - obstacle.position.y;
-                const dz = ball.position.z - obstacle.position.z;
-                
-                // Adjust for obstacle dimensions (approximating as box)
-                const halfWidth = obstacleSize.x / 2;
-                const halfHeight = obstacleSize.y / 2;
-                const halfDepth = obstacleSize.z / 2;
-                
-                // Check if ball is close enough to obstacle for potential collision
-                if (Math.abs(dx) < halfWidth + ballRadius && 
-                    Math.abs(dy) < halfHeight + ballRadius && 
-                    Math.abs(dz) < halfDepth + ballRadius) {
-                    
-                    // Find closest point on obstacle to ball
-                    const closestX = Math.max(-halfWidth, Math.min(dx, halfWidth));
-                    const closestY = Math.max(-halfHeight, Math.min(dy, halfHeight));
-                    const closestZ = Math.max(-halfDepth, Math.min(dz, halfDepth));
-                    
-                    // Transform closest point from obstacle local space to world space
-                    const worldClosest = new THREE.Vector3(
-                        closestX + obstacle.position.x,
-                        closestY + obstacle.position.y,
-                        closestZ + obstacle.position.z
+                // Check horizontal collision
+                if (horizontalDistance < cylinderRadius + ballRadius) {
+                    // Collision detected! Calculate normal vector
+                    const normal = new THREE.Vector3(
+                        horizontalDiff.x / horizontalDistance,
+                        0,
+                        horizontalDiff.y / horizontalDistance
                     );
                     
-                    // Calculate distance between ball and closest point
-                    const distance = new THREE.Vector3()
-                        .subVectors(ball.position, worldClosest)
-                        .length();
+                    // Calculate penetration depth
+                    const penetrationDepth = (cylinderRadius + ballRadius) - horizontalDistance;
                     
-                    // If distance is less than ball radius, we have a collision
-                    if (distance < ballRadius) {
-                        // Calculate normal vector
-                        const normal = new THREE.Vector3()
-                            .subVectors(ball.position, worldClosest)
-                            .normalize();
-                        
-                        // Move ball out of collision
-                        ball.position.x = worldClosest.x + normal.x * ballRadius;
-                        ball.position.y = worldClosest.y + normal.y * ballRadius;
-                        ball.position.z = worldClosest.z + normal.z * ballRadius;
-                        
-                        // Reflect velocity along normal (bouncing)
-                        const dot = velocity.x * normal.x + velocity.y * normal.y + velocity.z * normal.z;
-                        velocity.x = (velocity.x - 2 * dot * normal.x) * bounceFactor;
-                        velocity.y = (velocity.y - 2 * dot * normal.y) * bounceFactor;
-                        velocity.z = (velocity.z - 2 * dot * normal.z) * bounceFactor;
-                        
-                        // If hitting from above, consider it a ground
-                        if (normal.y > 0.7) {
-                            isOnGround = true;
-                        }
+                    // Push ball out of collision
+                    ballSphere.center.x += normal.x * penetrationDepth;
+                    ballSphere.center.z += normal.z * penetrationDepth;
+                    
+                    // Update ball position
+                    ball.position.copy(ballSphere.center);
+                    
+                    // Calculate reflection vector for velocity
+                    const dotProduct = velocity.x * normal.x + velocity.z * normal.z;
+                    velocity.x = (velocity.x - 2 * dotProduct * normal.x) * RESTITUTION;
+                    velocity.z = (velocity.z - 2 * dotProduct * normal.z) * RESTITUTION;
+                    
+                    // Check if we're on top of the cylinder
+                    if (ballSphere.center.y - ballRadius <= cylinderTop && 
+                        ballSphere.center.y > cylinderPosition.y && 
+                        horizontalDistance < cylinderRadius) {
+                        isOnGround = true;
+                        if (velocity.y < 0) velocity.y = 0;
                     }
                 }
             }
+        }
+
+        function handleBoxCollision(box, ballSphere, prevPosition) {
+            // Get box bounding box
+            const boundingBox = new THREE.Box3().setFromObject(box);
+            
+            // Check if sphere intersects with the box
+            if (checkSphereBoxIntersection(ballSphere, boundingBox)) {
+                // Find closest point on box to ball center
+                const closestPoint = new THREE.Vector3().copy(ballSphere.center);
+                
+                // Clamp point to box boundaries
+                closestPoint.clamp(boundingBox.min, boundingBox.max);
+                
+                // Calculate normal vector from closest point to ball center
+                const normal = new THREE.Vector3().subVectors(ballSphere.center, closestPoint).normalize();
+                
+                // Calculate distance
+                const distance = ballSphere.center.distanceTo(closestPoint);
+                
+                // If distance is less than radius, we have collision
+                if (distance < ballRadius) {
+                    // Calculate penetration depth
+                    const penetrationDepth = ballRadius - distance;
+                    
+                    // Move ball out of collision along normal
+                    ballSphere.center.addScaledVector(normal, penetrationDepth);
+                    
+                    // Update ball position
+                    ball.position.copy(ballSphere.center);
+                    
+                    // Reflect velocity with energy loss
+                    const dot = velocity.dot(normal);
+                    velocity.subScaledVector(normal, 2 * dot).multiplyScalar(RESTITUTION);
+                    
+                    // Check if normal is pointing up - we might be on a surface
+                    if (normal.y > 0.7) {
+                        isOnGround = true;
+                        if (velocity.y < 0) velocity.y = 0;
+                    }
+                    
+                    // Add a small random variation for natural rebounds
+                    if (!box.userData.isWall) {
+                        velocity.x += (Math.random() - 0.5) * 0.02;
+                        velocity.z += (Math.random() - 0.5) * 0.02;
+                    }
+                }
+            }
+        }
+
+        function checkSphereBoxIntersection(sphere, box) {
+            // Find the closest point on the box to the sphere center
+            const closestPoint = new THREE.Vector3().copy(sphere.center);
+            closestPoint.clamp(box.min, box.max);
+            
+            // Calculate squared distance
+            const distanceSquared = closestPoint.distanceToSquared(sphere.center);
+            
+            // If distance is less than radius squared, we have intersection
+            return distanceSquared < (sphere.radius * sphere.radius);
         }
 
         function checkTerrainBoundaries() {
@@ -513,19 +626,19 @@
             // Keep ball within terrain boundaries
             if (ball.position.x > halfSize - ballRadius) {
                 ball.position.x = halfSize - ballRadius;
-                velocity.x *= bounceFactor;
+                velocity.x = -velocity.x * RESTITUTION;
             }
             if (ball.position.x < -halfSize + ballRadius) {
                 ball.position.x = -halfSize + ballRadius;
-                velocity.x *= bounceFactor;
+                velocity.x = -velocity.x * RESTITUTION;
             }
             if (ball.position.z > halfSize - ballRadius) {
                 ball.position.z = halfSize - ballRadius;
-                velocity.z *= bounceFactor;
+                velocity.z = -velocity.z * RESTITUTION;
             }
             if (ball.position.z < -halfSize + ballRadius) {
                 ball.position.z = -halfSize + ballRadius;
-                velocity.z *= bounceFactor;
+                velocity.z = -velocity.z * RESTITUTION;
             }
         }
 
@@ -646,19 +759,390 @@
             }
         });
 
-        document.addEventListener("mouseup", function(e) {
-            if (moveDrag) {
-                resetJoystick(e, "move");
-                moveDrag = false;
-            }
-            if (rotateDrag) {
-                resetJoystick(e, "rotate");
-                rotateDrag = false;
-            }
-        });
+        // Here's the end of the document.addEventListener("mouseup") function that was cut off:
+		document.addEventListener("mouseup", function(e) {
+			if (moveDrag) {
+				resetJoystick(e, "move");
+				moveDrag = false;
+			}
+			if (rotateDrag) {
+				resetJoystick(e, "rotate");
+				rotateDrag = false;
+			}
+		});
 
-        // Initialize the game
-        window.onload = init;
-    </script>
-</body>
-</html>
+		// Keyboard controls for desktop
+		document.addEventListener("keydown", function(e) {
+			switch(e.key) {
+				case "ArrowUp":
+				case "w": moveVector.z = -1; break;
+				case "ArrowDown":
+				case "s": moveVector.z = 1; break;
+				case "ArrowLeft":
+				case "a": moveVector.x = -1; break;
+				case "ArrowRight":
+				case "d": moveVector.x = 1; break;
+				case "q": rotationAngle += 0.1; break;
+				case "e": rotationAngle -= 0.1; break;
+			}
+		});
+
+		document.addEventListener("keyup", function(e) {
+			switch(e.key) {
+				case "ArrowUp":
+				case "w":
+				case "ArrowDown":
+				case "s": moveVector.z = 0; break;
+				case "ArrowLeft":
+				case "a":
+				case "ArrowRight":
+				case "d": moveVector.x = 0; break;
+			}
+		});
+
+		// Initialize the game
+		window.onload = init;
+
+		// Improved collision functions
+		function handleBoxCollision(box, ballSphere, prevPosition) {
+			// Get box bounding box
+			const boundingBox = new THREE.Box3().setFromObject(box);
+			
+			// Check if sphere intersects with the box
+			if (checkSphereBoxIntersection(ballSphere, boundingBox)) {
+				// Find closest point on box to ball center
+				const closestPoint = new THREE.Vector3().copy(ballSphere.center);
+				closestPoint.clamp(boundingBox.min, boundingBox.max);
+				
+				// Calculate normal vector from closest point to ball center
+				const normal = new THREE.Vector3().subVectors(ballSphere.center, closestPoint).normalize();
+				
+				// Calculate distance
+				const distance = ballSphere.center.distanceTo(closestPoint);
+				
+				// If distance is less than radius, we have collision
+				if (distance < ballRadius) {
+					// Calculate penetration depth
+					const penetrationDepth = ballRadius - distance;
+					
+					// Move ball out of collision along normal
+					ballSphere.center.addScaledVector(normal, penetrationDepth);
+					
+					// Update ball position
+					ball.position.copy(ballSphere.center);
+					
+					// Calculate impact velocity
+					const impactVelocity = new THREE.Vector3(velocity.x, velocity.y, velocity.z);
+					const impactSpeed = impactVelocity.length();
+					
+					// Reflect velocity with energy loss and friction
+					const dot = velocity.dot(normal);
+					
+					// Only reflect if moving toward the surface
+					if (dot < 0) {
+						// Add elasticity
+						velocity.subScaledVector(normal, 2 * dot).multiplyScalar(RESTITUTION);
+						
+						// Add surface friction (tangential velocity reduction)
+						const tangent = new THREE.Vector3(velocity.x, velocity.y, velocity.z);
+						tangent.addScaledVector(normal, -tangent.dot(normal)).normalize();
+						
+						// Reduce tangential velocity component based on impact speed
+						const frictionFactor = Math.min(GROUND_FRICTION * impactSpeed, 0.95);
+						velocity.addScaledVector(tangent, -frictionFactor * tangent.dot(velocity));
+						
+						// Check if normal is pointing up - we might be on a surface
+						if (normal.y > 0.7) {
+							isOnGround = true;
+							if (velocity.y < 0) velocity.y = 0;
+						}
+						
+						// Add a small random variation for natural rebounds
+						if (!box.userData.isWall) {
+							const randomFactor = Math.min(0.05, impactSpeed * 0.01);
+							velocity.x += (Math.random() - 0.5) * randomFactor;
+							velocity.z += (Math.random() - 0.5) * randomFactor;
+						}
+						
+						// Add impact sound if speed is significant
+						if (impactSpeed > 1.0) {
+							// playImpactSound(impactSpeed); // Uncomment if you add sound
+						}
+					}
+				}
+			}
+		}
+
+		function handleCylinderCollision(cylinder, ballSphere, movementDir) {
+			// Get cylinder parameters
+			const cylinderRadius = cylinder.userData.radius;
+			const cylinderHeight = cylinder.geometry.parameters.height;
+			const cylinderPosition = cylinder.position.clone();
+			
+			// Apply cylinder's world transformation (for rotated cylinders)
+			const cylinderMatrix = cylinder.matrixWorld;
+			const cylinderUp = new THREE.Vector3(0, 1, 0).applyMatrix4(cylinderMatrix).normalize();
+			
+			// Project ball center onto cylinder axis
+			const cylinderToSphere = new THREE.Vector3().subVectors(ballSphere.center, cylinderPosition);
+			const dotProduct = cylinderToSphere.dot(cylinderUp);
+			const axisPoint = new THREE.Vector3().copy(cylinderPosition).addScaledVector(cylinderUp, dotProduct);
+			
+			// Calculate distance from axis
+			const radialVector = new THREE.Vector3().subVectors(ballSphere.center, axisPoint);
+			const radialDistance = radialVector.length();
+			
+			// Calculate height position relative to cylinder ends
+			const heightPosition = Math.abs(dotProduct);
+			const isWithinHeight = heightPosition <= cylinderHeight / 2;
+			
+			// Check if we're colliding with cylinder body
+			if (isWithinHeight && radialDistance < cylinderRadius + ballRadius) {
+				// Normalize the radial vector
+				if (radialDistance > 0.001) {
+					radialVector.normalize();
+				} else {
+					// If we're exactly on the axis, use a random direction
+					radialVector.set(Math.random() - 0.5, 0, Math.random() - 0.5).normalize();
+				}
+				
+				// Calculate penetration depth
+				const penetrationDepth = (cylinderRadius + ballRadius) - radialDistance;
+				
+				// Move ball out of collision
+				ballSphere.center.addScaledVector(radialVector, penetrationDepth);
+				ball.position.copy(ballSphere.center);
+				
+				// Calculate impact velocity
+				const impactVelocity = new THREE.Vector3(velocity.x, velocity.y, velocity.z);
+				const impactSpeed = impactVelocity.length();
+				
+				// Calculate reflection
+				const normalDot = velocity.dot(radialVector);
+				
+				// Only reflect if moving toward the surface
+				if (normalDot < 0) {
+					velocity.subScaledVector(radialVector, 2 * normalDot).multiplyScalar(RESTITUTION);
+					
+					// Add surface friction
+					const tangent = new THREE.Vector3(velocity.x, velocity.y, velocity.z);
+					tangent.addScaledVector(radialVector, -tangent.dot(radialVector)).normalize();
+					
+					const frictionFactor = Math.min(GROUND_FRICTION * impactSpeed, 0.95);
+					velocity.addScaledVector(tangent, -frictionFactor * tangent.dot(velocity));
+					
+					// Add small random variation
+					const randomFactor = Math.min(0.05, impactSpeed * 0.01);
+					velocity.x += (Math.random() - 0.5) * randomFactor;
+					velocity.z += (Math.random() - 0.5) * randomFactor;
+				}
+				
+				return true;
+			}
+			
+			// Check for collision with cylinder ends (caps)
+			const endPoint1 = new THREE.Vector3().copy(cylinderPosition).addScaledVector(cylinderUp, cylinderHeight / 2);
+			const endPoint2 = new THREE.Vector3().copy(cylinderPosition).addScaledVector(cylinderUp, -cylinderHeight / 2);
+			
+			const endPoints = [endPoint1, endPoint2];
+			for (let i = 0; i < endPoints.length; i++) {
+				const endPoint = endPoints[i];
+				const endToSphere = new THREE.Vector3().subVectors(ballSphere.center, endPoint);
+				const distance = endToSphere.length();
+				
+				if (distance < ballRadius) {
+					// Normalize direction
+					if (distance > 0.001) {
+						endToSphere.normalize();
+					} else {
+						endToSphere.copy(cylinderUp).multiplyScalar(i === 0 ? 1 : -1);
+					}
+					
+					// Calculate penetration and move ball
+					const penetrationDepth = ballRadius - distance;
+					ballSphere.center.addScaledVector(endToSphere, penetrationDepth);
+					ball.position.copy(ballSphere.center);
+					
+					// Calculate reflection
+					const normalDot = velocity.dot(endToSphere);
+					
+					// Only reflect if moving toward the surface
+					if (normalDot < 0) {
+						velocity.subScaledVector(endToSphere, 2 * normalDot).multiplyScalar(RESTITUTION);
+						
+						// Check if we're on top cap
+						if (i === 0 && endToSphere.y > 0.7) {
+							isOnGround = true;
+							if (velocity.y < 0) velocity.y = 0;
+						}
+					}
+					
+					return true;
+				}
+			}
+			
+			return false;
+		}
+
+		// Improved ramp collision detection
+		function handleRampCollision(ramp, ballSphere) {
+			// We need a specialized collision detection for our custom ramp geometry
+			// This is a simplified approach using raycasting
+			
+			// Cast rays from the ball in several directions, especially downward
+			const directions = [
+				new THREE.Vector3(0, -1, 0),  // Down
+				new THREE.Vector3(0.5, -0.5, 0).normalize(),  // Down-right
+				new THREE.Vector3(-0.5, -0.5, 0).normalize(), // Down-left
+				new THREE.Vector3(0, -0.5, 0.5).normalize(),  // Down-forward
+				new THREE.Vector3(0, -0.5, -0.5).normalize()  // Down-backward
+			];
+			
+			let collision = false;
+			let closestDistance = Number.MAX_VALUE;
+			let closestNormal = new THREE.Vector3();
+			
+			for (let dir of directions) {
+				// Set up raycaster from ball center
+				raycaster.set(ballSphere.center, dir);
+				
+				// Get intersections with the ramp
+				const intersects = raycaster.intersectObject(ramp);
+				
+				if (intersects.length > 0 && intersects[0].distance < ballRadius) {
+					collision = true;
+					
+					// Find the closest intersection point
+					if (intersects[0].distance < closestDistance) {
+						closestDistance = intersects[0].distance;
+						closestNormal = intersects[0].face.normal.clone();
+						
+						// Transform normal from local to world space
+						closestNormal.transformDirection(ramp.matrixWorld);
+					}
+				}
+			}
+			
+			if (collision) {
+				// Calculate penetration depth
+				const penetrationDepth = ballRadius - closestDistance;
+				
+				// Move ball out of collision
+				ballSphere.center.addScaledVector(closestNormal, penetrationDepth);
+				ball.position.copy(ballSphere.center);
+				
+				// Calculate reflection
+				const normalDot = velocity.dot(closestNormal);
+				
+				// Only reflect if moving toward the surface
+				if (normalDot < 0) {
+					velocity.subScaledVector(closestNormal, 2 * normalDot).multiplyScalar(RESTITUTION);
+					
+					// Calculate if we're on top of the ramp (normal pointing somewhat up)
+					if (closestNormal.y > 0.2) {
+						isOnGround = true;
+						
+						// Apply slip effect on sloped surfaces based on incline
+						const slopeFactor = 1.0 - closestNormal.y; // 0 for flat, 1 for vertical
+						
+						// Add gravitational acceleration along the slope
+						if (slopeFactor > 0.1) {
+							// Calculate slope direction (project gravity onto slope)
+							const slopeDir = new THREE.Vector3(0, -1, 0)
+								.addScaledVector(closestNormal, -closestNormal.y)
+								.normalize();
+							
+							// Add acceleration based on slope steepness
+							velocity.addScaledVector(slopeDir, GRAVITY * slopeFactor * 0.5);
+						}
+					}
+				}
+				
+				return true;
+			}
+			
+			return false;
+		}
+
+		function handleObstacleCollisions(prevPosition) {
+			const ballPosition = new THREE.Vector3(ball.position.x, ball.position.y, ball.position.z);
+			
+			// Create a bounding sphere for the ball
+			const ballBoundingSphere = new THREE.Sphere(ballPosition, ballRadius);
+			
+			// Get movement direction for this frame
+			const movementDir = new THREE.Vector3()
+				.subVectors(ballPosition, prevPosition)
+				.normalize();
+			
+			// Flag to track if collision occurred
+			let collisionOccurred = false;
+			
+			// First handle ramp collisions as they have different geometry
+			for (let i = 0; i < ramps.length; i++) {
+				if (handleRampCollision(ramps[i], ballBoundingSphere)) {
+					collisionOccurred = true;
+				}
+			}
+			
+			// Then handle other obstacles
+			for (let i = 0; i < obstacles.length; i++) {
+				const obstacle = obstacles[i];
+				
+				// Skip ramps as we handled them separately
+				if (obstacle.userData.isRamp) continue;
+				
+				// Use different collision detection based on obstacle type
+				if (obstacle.userData.isCylinder) {
+					if (handleCylinderCollision(obstacle, ballBoundingSphere, movementDir)) {
+						collisionOccurred = true;
+					}
+				} else {
+					// Box objects and walls
+					if (checkSphereBoxIntersection(ballBoundingSphere, new THREE.Box3().setFromObject(obstacle))) {
+						handleBoxCollision(obstacle, ballBoundingSphere, prevPosition);
+						collisionOccurred = true;
+					}
+				}
+			}
+			
+			// If a collision occurred, update the ball's position
+			if (collisionOccurred) {
+				ball.position.copy(ballBoundingSphere.center);
+			}
+			
+			// Ensure we're still within terrain boundaries
+			checkTerrainBoundaries();
+		}
+
+		// Add function to play sound effects
+		function playImpactSound(impactSpeed) {
+			// Implementation would go here if you add sound
+			// Could use WebAudio API to generate sounds dynamically
+			// or load audio samples based on impact strength
+		}
+
+		// Optional: Add particle effects for strong impacts
+		function createImpactParticles(position, normal, impactStrength) {
+			// Implementation would go here if you add particle effects
+		}
+
+		// Launch the game
+		init();
+						
+				
+				
+				
+				
+				
+				
+				
+				
+				
+				
+				
+				
+				
+				
+				
+				
